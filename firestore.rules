@@ -1,0 +1,70 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // 1. Fonctions utilitaires de sécurité
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Contrôle strict du domaine de l'email : @devinci.fr ou @edu.devinci.fr uniquement
+    function isDevinciUser() {
+      return isAuthenticated() && 
+        (request.auth.token.email.matches('.*@devinci[.]fr$') || 
+         request.auth.token.email.matches('.*@edu[.]devinci[.]fr$'));
+    }
+
+    // Contrôle des privilèges Staff IFT / Administrateur
+    function isStaff() {
+      return isDevinciUser() && (
+        request.auth.token.email in [
+          'mahel.mecherfi@edu.devinci.fr',
+          'mecherfi@edu.devinci.fr',
+          'ift.responsable@devinci.fr',
+          'dvic@devinci.fr',
+          'admin@devinci.fr'
+        ] ||
+        request.auth.token.email.matches('admin.*@.*') ||
+        request.auth.token.email.matches('ift.responsable.*@.*')
+      );
+    }
+
+    // 2. Règles sur la collection des commandes IFT ('orders')
+    match /orders/{orderId} {
+      
+      // LECTURE : Tous les membres DeVinci connectés peuvent consulter les commandes
+      allow read: if isDevinciUser();
+
+      // CRÉATION : Réservée aux membres DeVinci avec contrôle d'intégrité strict
+      allow create: if isDevinciUser()
+        // Protection 1 : Interdiction d'usurper l'identité d'un autre étudiant ou professeur
+        && request.resource.data.requestedBy == request.auth.token.email
+        // Protection 2 : Statut initial obligatoirement 'pendingIR' (interdit l'auto-validation)
+        && request.resource.data.status == 'pendingIR'
+        // Protection 3 : Validation du titre (3 à 150 caractères)
+        && request.resource.data.title is string
+        && request.resource.data.title.size() >= 3
+        && request.resource.data.title.size() <= 150
+        // Protection 4 : Validation du prix (nombre positif, plafond à 50 000€)
+        && request.resource.data.totalPrice is number
+        && request.resource.data.totalPrice >= 0
+        && request.resource.data.totalPrice <= 50000
+        // Protection 5 : Fournisseur et projet obligatoirement sous forme de chaînes valides
+        && request.resource.data.supplier is string
+        && request.resource.data.project is string;
+
+      // MODIFICATION / VALIDATION DE STATUT : Réservée exclusivement au Staff IFT
+      allow update: if isStaff()
+        // Le nouveau statut doit être dans la liste blanche officielle
+        && request.resource.data.status in [
+          'pendingIR', 'approved', 'ordered', 'received', 'completed', 'refusedIR', 'cancelled'
+        ]
+        // Le prix doit rester valide et positif
+        && request.resource.data.totalPrice is number
+        && request.resource.data.totalPrice >= 0;
+
+      // SUPPRESSION : Réservée uniquement au Staff IFT
+      allow delete: if isStaff();
+    }
+  }
+}
